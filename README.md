@@ -66,6 +66,22 @@ Swiggy's MCP is mocked for now.
 | `ORANGEINVEST_MODEL` | `claude-sonnet-5-5` | Model for the agent loop |
 | `ANTHROPIC_API_KEY` | | Or any credential the Anthropic SDK picks up |
 
+## Run
+
+```
+uv run uvicorn app.api:create_app --factory
+```
+
+| Endpoint | |
+|---|---|
+| `POST /sessions/{session_id}/messages` `{"text": "..."}` | Chat turn. Returns `{reply, pending_action}`; `pending_action` is set when there's a booking to confirm |
+| `POST /sessions/{session_id}/actions/{action_id}/confirm` | Executes the booking. Always 200 with the action's `status`; safe to repeat. `UNKNOWN` means confirm again to retry |
+| `POST /sessions/{session_id}/actions/{action_id}/cancel` | Cancels a pending booking |
+
+The client shows `pending_action.summary` on a Confirm button. Typing "yes" in
+chat never books anything. No auth yet: a session id is all it takes to act on
+a session.
+
 ## Run tests
 
 ```
