@@ -35,6 +35,17 @@ Swiggy's MCP is mocked for now.
   serialised there, not in the API, so safety doesn't depend on the caller.
   It's an in-process lock: running more than one instance needs a DB or
   advisory lock (the CAS on actions already holds across processes).
+- **Agent loop is a manual Messages-API loop** (the gateway must see every
+  tool call). Claude Opus 5.5, adaptive thinking, effort `medium`, automatic
+  prompt caching, and server-side refusal fallbacks (`fallbacks: "default"`).
+- **History is append-only and stored verbatim**, thinking blocks included,
+  because they're only valid in the conversation that produced them. The
+  system prompt is frozen (for caching); the current time and anything that
+  happened between turns (confirm/cancel outcomes) go in a `role: "system"`
+  message after the user's message, never in a fake user message.
+- **A proposed write ends the turn** without another model call. The client
+  shows the summary on a Confirm button; the outcome reaches the model on the
+  next turn. A turn that fails before the model answers stores nothing.
 - **Async throughout.** MCP client and repos are async so the live MCP SDK and a
   Postgres driver drop in without touching the gateway.
 - **Schemas come from the server.** `MCPClient.list_tools()` is the source of
