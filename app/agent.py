@@ -49,8 +49,8 @@ not book anything yet: it prepares the booking, and the person confirms it with 
 button in the app. Don't ask them to type "yes", and don't say it's booked.
 
 A booking is only made or cancelled when the person presses Confirm or Cancel. \
-You'll get a system message with the outcome. Only then tell them it's booked, \
-and give the booking ID.
+The booking system reports the outcome to you in a system message on their next \
+turn. Only then tell them it's booked, and give the booking ID.
 
 All times are in India (Asia/Kolkata). A system message after each user message \
 gives the current time; use it to work out "tonight", "tomorrow" and so on.
@@ -59,6 +59,9 @@ If a tool returns an error, explain it plainly and offer a way forward. Keep \
 replies short."""
 
 CONFIRM_PROMPT = "Please check the booking details and tap Confirm."
+# Framed as coming from the booking system: phrased as "the user confirmed",
+# the model read it as an unverified claim from the user and ignored it.
+NOTES_HEADER = "Update from the booking system since your last reply (not from the user):"
 UNAVAILABLE = "I'm having trouble right now. Please try again in a moment."
 CANT_HELP = "Sorry, I can't help with that."
 GAVE_UP = "Sorry, I couldn't finish that. Could you try again, maybe with a bit more detail?"
@@ -78,17 +81,21 @@ def outcome_note(a: PendingAction) -> str | None:
     """What the model should be told after the client confirmed or cancelled."""
     match a.status:
         case ActionStatus.SUCCEEDED:
-            return f"The user confirmed: {a.summary}. It succeeded. Result: {json.dumps(a.result)}"
+            return ("The user pressed Confirm in the app, and the booking you prepared was made.\n"
+                    f"Booking: {json.dumps(a.result)}")
         case ActionStatus.FAILED:
-            return f"The user confirmed: {a.summary}. It failed: {json.dumps(a.error)}"
+            return ("The user pressed Confirm in the app, but the booking failed, so nothing was "
+                    f"booked.\nPrepared: {a.summary}\nError: {json.dumps(a.error)}")
         case ActionStatus.UNKNOWN:
-            return (f"The user confirmed: {a.summary}. We couldn't tell whether it went through. "
-                    "They can press Confirm again to retry safely; it won't book twice.")
+            return ("The user pressed Confirm in the app, but we couldn't tell whether the booking "
+                    "went through. They can press Confirm again to retry safely; it won't book "
+                    f"twice.\nPrepared: {a.summary}")
         case ActionStatus.CANCELLED:
-            return f"The user cancelled: {a.summary}. Nothing was booked."
+            return f"The user pressed Cancel in the app. Nothing was booked.\nPrepared: {a.summary}"
         case ActionStatus.EXPIRED:
-            return (f"This expired before the user confirmed it: {a.summary}. Nothing was booked; "
-                    "check availability again if they still want it.")
+            return ("The booking you prepared expired before the user confirmed it. Nothing was "
+                    "booked; check availability again if they still want it.\n"
+                    f"Prepared: {a.summary}")
     return None  # PENDING / EXECUTING / SUPERSEDED: nothing settled to report
 
 
@@ -123,8 +130,8 @@ class Agent:
     async def _run_turn(self, session_id: str, user_text: str) -> TurnResult:
         notes = await self._sessions.notes(session_id)
         now = self._clock().astimezone(IST)
-        context = "\n\n".join([f"Current time: {now:%A} {now.day} {now:%B %Y, %H:%M} IST.",
-                               *notes.values()])
+        parts = [NOTES_HEADER + "\n" + "\n\n".join(notes.values())] if notes else []
+        context = "\n\n".join([*parts, f"Current time: {now:%A} {now.day} {now:%B %Y, %H:%M} IST."])
         opening = [{"role": "user", "content": user_text},
                    {"role": "system", "content": context}]
         tools = await self._gateway.tools()
@@ -156,7 +163,8 @@ class Agent:
                 await self._sessions.clear_notes(session_id, list(notes))
 
             if not any(b.get("type") == "tool_use" for b in resp.content):
-                return TurnResult(_text(resp.content))
+                # Seen live: an end_turn with no text. Never send the user a blank reply.
+                return TurnResult(_text(resp.content) or GAVE_UP)
 
             results, pending = [], None
             for block in resp.content:

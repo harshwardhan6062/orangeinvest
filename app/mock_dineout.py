@@ -96,9 +96,11 @@ class MockDineout:
         return RESTAURANTS[rid]
 
     def _search(self, args: dict[str, Any]) -> dict[str, Any]:
-        q, city = args["query"].casefold(), args["city"].casefold()
+        # Every query word must appear in the name or area ("Phurr Indiranagar").
+        words, city = args["query"].casefold().split(), args["city"].casefold()
         hits = [r for r in RESTAURANTS.values()
-                if q in r["name"].casefold() and r["city"].casefold() == city]
+                if r["city"].casefold() == city
+                and all(w in f"{r['name']} {r['area']}".casefold() for w in words)]
         return {"restaurants": deepcopy(hits)}
 
     def _slots(self, args: dict[str, Any]) -> dict[str, Any]:

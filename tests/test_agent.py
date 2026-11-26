@@ -137,6 +137,19 @@ async def test_each_turn_gets_time_as_system_message(env):
     assert system["content"].startswith("Current time: Thursday 26 November 2026, 12:00 IST.")
 
 
+async def test_no_notes_means_no_header(env):
+    make, *_ = env
+    agent, llm = make(say("hi"))
+    await agent.run_turn("s1", "hello")
+    assert "booking system" not in llm.calls[0][-1]["content"]
+
+
+async def test_empty_end_turn_never_sends_blank_reply(env):
+    make, *_ = env
+    agent, _ = make(LLMResponse("end_turn", [{"type": "thinking", "thinking": "", "signature": "s"}]))
+    assert (await agent.run_turn("s1", "hello")).reply == GAVE_UP
+
+
 async def test_system_prompt_and_tools_are_frozen(env):
     make, *_ = env
     agent, llm = make(say("a"), say("b"))
@@ -279,8 +292,10 @@ async def test_confirm_outcome_is_told_on_next_turn(env):
     user, system = sent[-2:]
     assert user == {"role": "user", "content": "did it work?"}
     assert system["role"] == "system"
-    assert system["content"].count("It succeeded") == 1
+    assert system["content"].startswith("Update from the booking system")
+    assert system["content"].count("booking you prepared was made") == 1
     assert done.result["booking_id"] in system["content"]
+    assert system["content"].rstrip().endswith("IST.")  # outcome first, time last
     assert await sessions.notes("s1") == {}  # delivered, then cleared
 
 
@@ -291,7 +306,7 @@ async def test_note_survives_a_failed_turn(env):
     await agent.record_outcome(await gw.cancel("s1", pending.id))
     assert (await agent.run_turn("s1", "hi")).reply == UNAVAILABLE
     await agent.run_turn("s1", "hi again")
-    assert "cancelled" in llm.calls[-1][-1]["content"]
+    assert "pressed Cancel" in llm.calls[-1][-1]["content"]
 
 
 def test_outcome_note_texts():

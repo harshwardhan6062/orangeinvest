@@ -38,6 +38,17 @@ async def test_search_finds_both_phurr_outlets(m):
     assert sorted(r["area"] for r in res["restaurants"]) == ["Indiranagar", "Koramangala"]
 
 
+@pytest.mark.parametrize("q,ids", [
+    ("Phurr Indiranagar", ["phurr-indiranagar"]),
+    ("indiranagar", ["phurr-indiranagar"]),
+    ("phurr koramangala", ["phurr-koramangala"]),
+    ("Phurr HSR", []),
+])
+async def test_search_matches_name_and_area(m, q, ids):
+    res = await m.call_tool("search_restaurants", {"query": q, "city": "Bangalore"})
+    assert [r["id"] for r in res["restaurants"]] == ids
+
+
 async def test_search_other_city_is_empty_not_an_error(m):
     res = await m.call_tool("search_restaurants", {"query": "phurr", "city": "Mumbai"})
     assert res == {"restaurants": []}
