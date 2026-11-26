@@ -29,8 +29,8 @@ from typing import Any
 from app.gateway import Gateway
 from app.llm import LLM, LLMUnavailable
 from app.locks import SessionLocks
-from app.models import IST, ActionStatus, PendingAction, utcnow
-from app.repos import SessionRepo
+from app.models import IST, ActionStatus, AuditEntry, AuditEvent, PendingAction, utcnow
+from app.repos import AuditLog, SessionRepo
 
 log = logging.getLogger(__name__)
 
@@ -98,12 +98,14 @@ class Agent:
         llm: LLM,
         gateway: Gateway,
         sessions: SessionRepo,
+        audit: AuditLog,
         clock: Callable[[], datetime] = utcnow,
         max_steps: int = MAX_STEPS,
     ) -> None:
         self._llm = llm
         self._gateway = gateway
         self._sessions = sessions
+        self._audit = audit
         self._clock = clock
         self._max_steps = max_steps
         self._locks = SessionLocks()  # turns in one session never interleave in history
@@ -140,7 +142,12 @@ class Agent:
                 # refusal, max_tokens, ...: don't store a partial or declined turn.
                 log.warning("turn stopped: %s", resp.stop_reason,
                             extra={"session_id": session_id, "step": step})
-                return TurnResult(CANT_HELP if resp.stop_reason == "refusal" else GAVE_UP)
+                if resp.stop_reason == "refusal":
+                    await self._audit.append(AuditEntry(
+                        session_id, AuditEvent.REFUSED, at=self._clock(),
+                        detail={"step": step, "stop_details": resp.stop_details}))
+                    return TurnResult(CANT_HELP)
+                return TurnResult(GAVE_UP)
 
             await self._sessions.append(session_id, *opening,
                                         {"role": "assistant", "content": resp.content})

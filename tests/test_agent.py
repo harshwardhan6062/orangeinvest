@@ -18,7 +18,7 @@ from app.agent import (
 from app.gateway import Gateway
 from app.llm import LLMResponse, LLMUnavailable
 from app.mock_dineout import MockDineout
-from app.models import IST, ActionStatus
+from app.models import IST, ActionStatus, AuditEvent
 from app.repos import InMemoryAuditLog, InMemoryPendingActionRepo, InMemorySessionRepo
 
 T0 = datetime(2026, 11, 26, 12, 0, tzinfo=IST)
@@ -82,14 +82,15 @@ class Clock:
 
 @pytest.fixture
 def env():
-    clock, sessions = Clock(), InMemorySessionRepo()
+    clock, sessions, audit = Clock(), InMemorySessionRepo(), InMemoryAuditLog()
     mock = MockDineout()
-    gw = Gateway(mock, sessions, InMemoryPendingActionRepo(), InMemoryAuditLog(), clock=clock)
+    gw = Gateway(mock, sessions, InMemoryPendingActionRepo(), audit, clock=clock)
 
     def make(*script, **kw):
         llm = FakeLLM(*script)
-        return Agent(llm, gw, sessions, clock=clock, **kw), llm
+        return Agent(llm, gw, sessions, audit, clock=clock, **kw), llm
 
+    make.audit = audit
     return make, gw, sessions, mock
 
 
@@ -232,6 +233,16 @@ async def test_bad_first_stop_stores_nothing(env, reason, reply):
     assert await sessions.history("s1") == []
 
 
+async def test_refusal_is_audited(env):
+    make, *_ = env
+    details = {"type": "refusal", "category": "cyber", "explanation": "x"}
+    agent, _ = make(LLMResponse("refusal", [], details))
+    assert (await agent.run_turn("s1", "something")).reply == CANT_HELP
+    [entry] = await make.audit.entries("s1")
+    assert entry.event == AuditEvent.REFUSED and entry.tool is None
+    assert entry.detail == {"step": 0, "stop_details": details}
+
+
 async def test_failed_turn_does_not_break_the_next_one(env):
     make, _, sessions, _ = env
     agent, llm = make(LLMResponse("refusal", []), LLMUnavailable("down"), say("hello again"))
@@ -309,7 +320,7 @@ async def test_concurrent_turns_in_one_session_do_not_interleave(env):
 
     clock, gw = Clock(), env[1]
     llm = SlowLLM(use(SEARCH), say("a"), use(SEARCH), say("b"))
-    agent = Agent(llm, gw, sessions, clock=clock)
+    agent = Agent(llm, gw, sessions, make.audit, clock=clock)
     await asyncio.gather(agent.run_turn("s1", "one"), agent.run_turn("s1", "two"))
     h = await check_history(sessions)
     assert [m["role"] for m in h] == ["user", "system", "assistant", "user", "assistant"] * 2

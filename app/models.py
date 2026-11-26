@@ -64,14 +64,15 @@ class AuditEvent(StrEnum):
     UNKNOWN = "UNKNOWN"          # outcome unknown; safe to retry with the same key
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
+    REFUSED = "REFUSED"          # the model declined a turn (no tool involved)
 
 
 @dataclass(frozen=True)
 class AuditEntry:
     session_id: str
     event: AuditEvent
-    tool: str
-    args: dict[str, Any]
+    tool: str | None = None      # None for events that aren't about a tool call
+    args: dict[str, Any] = field(default_factory=dict)
     action_id: str | None = None
     detail: dict[str, Any] | None = None
     at: datetime = field(default_factory=utcnow)

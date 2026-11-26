@@ -36,8 +36,15 @@ Swiggy's MCP is mocked for now.
   It's an in-process lock: running more than one instance needs a DB or
   advisory lock (the CAS on actions already holds across processes).
 - **Agent loop is a manual Messages-API loop** (the gateway must see every
-  tool call). Claude Opus 5.5, adaptive thinking, effort `medium`, automatic
-  prompt caching, and server-side refusal fallbacks (`fallbacks: "default"`).
+  tool call), with adaptive thinking, effort `medium` and automatic prompt
+  caching.
+- **Claude Sonnet 5.5 by default.** One user turn is several model calls
+  (search, slots, propose), so latency and cost matter more than peak
+  capability. Change it with `ORANGEINVEST_MODEL`, e.g.
+  `ORANGEINVEST_MODEL=claude-opus-5-5`.
+- **No refusal fallbacks.** Server-side fallbacks would silently switch models
+  mid-conversation and make evals irreproducible. A refusal ends the turn with
+  a polite reply and a `REFUSED` audit entry.
 - **History is append-only and stored verbatim**, thinking blocks included,
   because they're only valid in the conversation that produced them. The
   system prompt is frozen (for caching); the current time and anything that
@@ -51,6 +58,13 @@ Swiggy's MCP is mocked for now.
 - **Schemas come from the server.** `MCPClient.list_tools()` is the source of
   truth for tool schemas; the registry only holds policy and acts as an
   allowlist (default deny).
+
+## Configuration
+
+| Env var | Default | |
+|---|---|---|
+| `ORANGEINVEST_MODEL` | `claude-sonnet-5-5` | Model for the agent loop |
+| `ANTHROPIC_API_KEY` | | Or any credential the Anthropic SDK picks up |
 
 ## Run tests
 
