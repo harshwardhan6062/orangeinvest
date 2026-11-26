@@ -1,3 +1,5 @@
 .venv/
 __pycache__/
 .pytest_cache/
+smoke.json
+evals/report.json

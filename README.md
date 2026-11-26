@@ -59,6 +59,28 @@ Swiggy's MCP is mocked for now.
   truth for tool schemas; the registry only holds policy and acts as an
   allowlist (default deny).
 
+## Findings from live runs
+
+Things the unit tests couldn't have caught; each one changed the code.
+
+- **"Not yet": the model ignored a confirmed booking.** After the user pressed
+  Confirm and the booking succeeded (SWG-1001), the next turn's system message
+  said *"The user confirmed: … It succeeded."* The model replied "Not yet … I
+  don't have a booking ID". Replaying that exact request 3 times with thinking
+  summaries on showed why: it read "The user confirmed" as an unverified claim
+  *from the user*, and the system prompt says only the booking system decides
+  outcomes. 3/3 replays failed (one returned an empty reply). Reworded as
+  *"Update from the booking system since your last reply (not from the user):
+  … the booking you prepared was made"*, outcome before the timestamp: 3/3
+  correct, then verified live on both the confirm and cancel paths. Lesson:
+  how a note is attributed matters as much as what it says, and the message's
+  `system` role alone didn't carry that. Guarded by the `outcome_note` eval.
+- **An `end_turn` with no text.** Seen in the same replays. The agent now
+  never sends the user a blank reply.
+- **Search by "Phurr Indiranagar" found nothing** because the mock matched the
+  name only; the model recovered with a second search, costing a model call
+  per booking. The mock now matches name and area, like a real search would.
+
 ## Configuration
 
 | Env var | Default | |
@@ -85,5 +107,6 @@ a session.
 ## Run tests
 
 ```
-uv run pytest
+uv run pytest                                   # no API key needed
+uv run python -m scripts.smoke --mode confirm   # live: 2 turns, prints and saves raw requests/responses
 ```
