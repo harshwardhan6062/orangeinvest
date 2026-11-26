@@ -8,19 +8,27 @@ decides whether it's allowed.
   only `confirm()` (called by the client, never exposed to the LLM) executes,
   using the stored args and a gateway-generated idempotency key.
 - Every decision is written to the audit log.
+- All operations on one session are serialised by a per-session lock, so
+  callers can't race each other on facts or pending actions.
 
-Tool calls within one session must be made one at a time: facts are
-read-modify-write per call.
+Write outcomes:
+- the server answered with an error (MCPError) -> FAILED, terminal
+- no definite answer (timeout, transport error, cancellation) -> UNKNOWN;
+  confirming again retries with the same idempotency key, so the server
+  either returns the booking it already made or makes it now, never twice.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
+from weakref import WeakValueDictionary
 
 from app.mcp_client import ErrorCode, MCPClient, MCPError, ToolSchema
 from app.models import (
@@ -38,6 +46,11 @@ from app.validators import ValidationError
 
 PENDING_TTL = timedelta(minutes=5)
 
+_UNKNOWN_OUTCOME = {
+    "code": ErrorCode.UPSTREAM_ERROR.value,
+    "message": "no definite answer from the restaurant service; confirm again to retry safely",
+}
+
 
 class GatewayCode(StrEnum):
     NOT_ALLOWED = "NOT_ALLOWED"
@@ -47,6 +60,10 @@ class GatewayCode(StrEnum):
 class ActionNotFound(Exception):
     """No such action in this session. Same error either way, so one session
     can't probe another's action ids."""
+
+
+class InvariantViolation(RuntimeError):
+    """State the gateway's own locking should make impossible."""
 
 
 @dataclass(frozen=True)
@@ -59,7 +76,7 @@ def _error(code: str, message: str) -> dict[str, Any]:
     return {"error": {"code": str(code), "message": message}}
 
 
-def _upstream_error(e: Exception) -> dict[str, Any]:
+def _read_error(e: Exception) -> dict[str, Any]:
     if isinstance(e, MCPError):
         return e.to_result()
     # Unexpected failure (bug, timeout, transport). Don't leak internals to the LLM.
@@ -84,12 +101,29 @@ class Gateway:
         self._registry = registry
         self._clock = clock
         self._ttl = ttl
+        # Entries vanish once no task holds or waits on the lock.
+        # Single-process only; multi-instance needs a DB/advisory lock.
+        self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+
+    @asynccontextmanager
+    async def _session_lock(self, session_id: str) -> AsyncIterator[None]:
+        lock = self._locks.get(session_id)
+        if lock is None:
+            lock = self._locks[session_id] = asyncio.Lock()
+        async with lock:
+            yield
 
     async def tools(self) -> list[ToolSchema]:
         """Schemas the LLM may see: the server's, filtered by the registry."""
         return visible_tools(await self._client.list_tools(), self._registry)
 
+    # --- model-facing ---------------------------------------------------------
+
     async def call(self, session_id: str, name: str, args: dict[str, Any]) -> ToolResult:
+        async with self._session_lock(session_id):
+            return await self._call(session_id, name, args)
+
+    async def _call(self, session_id: str, name: str, args: dict[str, Any]) -> ToolResult:
         spec = self._registry.get(name)
         if spec is None:
             await self._log(session_id, AuditEvent.DENIED, name, args)
@@ -109,7 +143,7 @@ class Gateway:
         try:
             result = await self._client.call_tool(name, args)
         except Exception as e:
-            err = _upstream_error(e)
+            err = _read_error(e)
             await self._log(session_id, AuditEvent.READ_FAILED, name, args,
                             detail={**err, "exception": repr(e)})
             return ToolResult(err)
@@ -123,7 +157,8 @@ class Gateway:
     async def _propose(
         self, session_id: str, spec: ToolSpec, args: dict[str, Any], ctx: ToolContext
     ) -> ToolResult:
-        assert spec.summary is not None  # enforced by ToolSpec
+        if spec.summary is None:
+            raise InvariantViolation(f"WRITE tool {spec.name!r} has no summary builder")
         action = PendingAction(
             id=uuid4().hex,
             session_id=session_id,
@@ -145,50 +180,75 @@ class Gateway:
             pending=action,
         )
 
+    # --- client-facing (never exposed to the LLM) -----------------------------
+
     async def confirm(self, session_id: str, action_id: str) -> PendingAction:
-        """Client-only. Executes the stored action at most once. Confirming an
-        action that is no longer PENDING returns its current state unchanged."""
-        a = await self._get(session_id, action_id)
-        if a.status is not ActionStatus.PENDING:
-            return a
+        """Executes a PENDING action, or retries an UNKNOWN one with the same
+        idempotency key. Any other state is returned unchanged, so a duplicate
+        confirm gets the first one's outcome."""
+        async with self._session_lock(session_id):
+            a = await self._get(session_id, action_id)
+            if a.status is ActionStatus.PENDING:
+                if a.is_expired(self._clock()):
+                    return await self._expire(a)
+            elif a.status is not ActionStatus.UNKNOWN:
+                return a
 
-        if a.is_expired(self._clock()):
-            expired = await self._pending.transition(a.id, ActionStatus.PENDING, ActionStatus.EXPIRED)
-            if expired is None:  # lost a race; report whatever won
+            # CAS still matters across processes, where the lock doesn't reach.
+            running = await self._pending.transition(a.id, a.status, ActionStatus.EXECUTING)
+            if running is None:
                 return await self._get(session_id, action_id)
-            await self._log(session_id, AuditEvent.EXPIRED, a.tool, a.args, action_id=a.id)
-            return expired
+            await self._log(session_id, AuditEvent.CONFIRMED, a.tool, a.args, action_id=a.id,
+                            detail={"retry": True} if a.status is ActionStatus.UNKNOWN else None)
+            return await self._execute(running)
 
-        running = await self._pending.transition(a.id, ActionStatus.PENDING, ActionStatus.EXECUTING)
-        if running is None:
-            return await self._get(session_id, action_id)
-        await self._log(session_id, AuditEvent.CONFIRMED, a.tool, a.args, action_id=a.id)
-
+    async def _execute(self, a: PendingAction) -> PendingAction:
         try:
-            result = await self._client.call_tool(
-                a.tool, a.args, idempotency_key=a.idempotency_key)
+            result = await self._client.call_tool(a.tool, a.args, idempotency_key=a.idempotency_key)
+        except asyncio.CancelledError as e:
+            # BaseException: not caught below. Record the uncertainty, then let it propagate.
+            await self._settle(a, ActionStatus.UNKNOWN, AuditEvent.UNKNOWN, e, error=_UNKNOWN_OUTCOME)
+            raise
+        except MCPError as e:
+            # The server answered definitively: terminal.
+            return await self._settle(a, ActionStatus.FAILED, AuditEvent.FAILED, e,
+                                      error=e.to_result()["error"])
         except Exception as e:
-            err = _upstream_error(e)["error"]
-            done = await self._pending.transition(
-                a.id, ActionStatus.EXECUTING, ActionStatus.FAILED, error=err)
-            await self._log(session_id, AuditEvent.FAILED, a.tool, a.args, action_id=a.id,
-                            detail={"error": err, "exception": repr(e)})
-        else:
-            done = await self._pending.transition(
-                a.id, ActionStatus.EXECUTING, ActionStatus.SUCCEEDED, result=result)
-            await self._log(session_id, AuditEvent.SUCCEEDED, a.tool, a.args, action_id=a.id,
-                            detail={"result": result})
-        assert done is not None  # only this call can move it out of EXECUTING
+            # Timeout / transport / anything else: we don't know if it happened.
+            return await self._settle(a, ActionStatus.UNKNOWN, AuditEvent.UNKNOWN, e,
+                                      error=_UNKNOWN_OUTCOME)
+        return await self._settle(a, ActionStatus.SUCCEEDED, AuditEvent.SUCCEEDED, None,
+                                  result=result, error=None)
+
+    async def _settle(self, a: PendingAction, to: ActionStatus, event: AuditEvent,
+                      exc: BaseException | None, **updates: Any) -> PendingAction:
+        done = await self._pending.transition(a.id, ActionStatus.EXECUTING, to, **updates)
+        if done is None:
+            raise InvariantViolation(f"action {a.id} left EXECUTING while we were executing it")
+        detail = {k: v for k, v in updates.items() if v is not None}
+        if exc is not None:
+            detail["exception"] = repr(exc)
+        await self._log(a.session_id, event, a.tool, a.args, action_id=a.id, detail=detail or None)
         return done
+
+    async def _expire(self, a: PendingAction) -> PendingAction:
+        expired = await self._pending.transition(a.id, ActionStatus.PENDING, ActionStatus.EXPIRED)
+        if expired is None:  # lost a cross-process race; report whatever won
+            return await self._get(a.session_id, a.id)
+        await self._log(a.session_id, AuditEvent.EXPIRED, a.tool, a.args, action_id=a.id)
+        return expired
 
     async def cancel(self, session_id: str, action_id: str) -> PendingAction:
-        """Client-only. Cancelling a non-PENDING action returns its state unchanged."""
-        a = await self._get(session_id, action_id)
-        done = await self._pending.transition(a.id, ActionStatus.PENDING, ActionStatus.CANCELLED)
-        if done is None:
-            return await self._get(session_id, action_id)
-        await self._log(session_id, AuditEvent.CANCELLED, a.tool, a.args, action_id=a.id)
-        return done
+        """Cancelling a non-PENDING action returns its state unchanged."""
+        async with self._session_lock(session_id):
+            a = await self._get(session_id, action_id)
+            done = await self._pending.transition(a.id, ActionStatus.PENDING, ActionStatus.CANCELLED)
+            if done is None:
+                return await self._get(session_id, action_id)
+            await self._log(session_id, AuditEvent.CANCELLED, a.tool, a.args, action_id=a.id)
+            return done
+
+    # --- helpers --------------------------------------------------------------
 
     async def _get(self, session_id: str, action_id: str) -> PendingAction:
         a = await self._pending.get(action_id)

@@ -25,6 +25,16 @@ Swiggy's MCP is mocked for now.
   same party size, in the last 5 minutes. The confirm summary is built from that
   cache, never from names the LLM typed. A slot that fills up between proposal
   and confirm still fails safely with `SLOT_UNAVAILABLE`.
+- **FAILED vs UNKNOWN.** If the server answers with an error (`SLOT_UNAVAILABLE`,
+  `UPSTREAM_ERROR`, ...) the action is `FAILED`, terminal. If there's no
+  definite answer (timeout, transport error, request cancelled mid-call) it's
+  `UNKNOWN`: confirming again retries with the *same* idempotency key, so the
+  server returns the booking it already made or makes it now, never twice.
+  Retries skip the 5-minute TTL; the user already confirmed in time.
+- **Per-session lock in the gateway.** Every gateway operation on a session is
+  serialised there, not in the API, so safety doesn't depend on the caller.
+  It's an in-process lock: running more than one instance needs a DB or
+  advisory lock (the CAS on actions already holds across processes).
 - **Async throughout.** MCP client and repos are async so the live MCP SDK and a
   Postgres driver drop in without touching the gateway.
 - **Schemas come from the server.** `MCPClient.list_tools()` is the source of

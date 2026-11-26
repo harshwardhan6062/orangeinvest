@@ -28,6 +28,7 @@ class ActionStatus(StrEnum):
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
     SUPERSEDED = "SUPERSEDED"
+    UNKNOWN = "UNKNOWN"  # no definite answer (timeout, transport, cancelled); confirm retries with the same key
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class AuditEvent(StrEnum):
     CONFIRMED = "CONFIRMED"      # user confirmed; execution starting
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"          # outcome unknown; safe to retry with the same key
     CANCELLED = "CANCELLED"
     EXPIRED = "EXPIRED"
 
