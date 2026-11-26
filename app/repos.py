@@ -24,6 +24,12 @@ class SessionRepo(Protocol):
     async def facts(self, session_id: str) -> dict[str, Any]: ...
     async def save_facts(self, session_id: str, facts: dict[str, Any]) -> None: ...
 
+    # Notes for the model that arrive between turns (e.g. a confirm outcome).
+    # Keyed so the same event noted twice is only told once.
+    async def notes(self, session_id: str) -> dict[str, str]: ...
+    async def add_note(self, session_id: str, key: str, text: str) -> None: ...
+    async def clear_notes(self, session_id: str, keys: list[str]) -> None: ...
+
 
 class PendingActionRepo(Protocol):
     async def get(self, action_id: str) -> PendingAction | None: ...
@@ -51,6 +57,7 @@ class InMemorySessionRepo:
     def __init__(self) -> None:
         self._msgs: dict[str, list[dict[str, Any]]] = {}
         self._facts: dict[str, dict[str, Any]] = {}
+        self._notes: dict[str, dict[str, str]] = {}
 
     async def history(self, session_id: str) -> list[dict[str, Any]]:
         return deepcopy(self._msgs.get(session_id, []))
@@ -63,6 +70,17 @@ class InMemorySessionRepo:
 
     async def save_facts(self, session_id: str, facts: dict[str, Any]) -> None:
         self._facts[session_id] = deepcopy(facts)
+
+    async def notes(self, session_id: str) -> dict[str, str]:
+        return dict(self._notes.get(session_id, {}))
+
+    async def add_note(self, session_id: str, key: str, text: str) -> None:
+        self._notes.setdefault(session_id, {})[key] = text
+
+    async def clear_notes(self, session_id: str, keys: list[str]) -> None:
+        pending = self._notes.get(session_id, {})
+        for k in keys:
+            pending.pop(k, None)
 
 
 class InMemoryPendingActionRepo:

@@ -21,15 +21,14 @@ Write outcomes:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
-from weakref import WeakValueDictionary
 
+from app.locks import SessionLocks
 from app.mcp_client import ErrorCode, MCPClient, MCPError, ToolSchema
 from app.models import (
     ActionStatus,
@@ -101,17 +100,7 @@ class Gateway:
         self._registry = registry
         self._clock = clock
         self._ttl = ttl
-        # Entries vanish once no task holds or waits on the lock.
-        # Single-process only; multi-instance needs a DB/advisory lock.
-        self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
-
-    @asynccontextmanager
-    async def _session_lock(self, session_id: str) -> AsyncIterator[None]:
-        lock = self._locks.get(session_id)
-        if lock is None:
-            lock = self._locks[session_id] = asyncio.Lock()
-        async with lock:
-            yield
+        self._locks = SessionLocks()
 
     async def tools(self) -> list[ToolSchema]:
         """Schemas the LLM may see: the server's, filtered by the registry."""
@@ -120,7 +109,7 @@ class Gateway:
     # --- model-facing ---------------------------------------------------------
 
     async def call(self, session_id: str, name: str, args: dict[str, Any]) -> ToolResult:
-        async with self._session_lock(session_id):
+        async with self._locks.hold(session_id):
             return await self._call(session_id, name, args)
 
     async def _call(self, session_id: str, name: str, args: dict[str, Any]) -> ToolResult:
@@ -186,7 +175,7 @@ class Gateway:
         """Executes a PENDING action, or retries an UNKNOWN one with the same
         idempotency key. Any other state is returned unchanged, so a duplicate
         confirm gets the first one's outcome."""
-        async with self._session_lock(session_id):
+        async with self._locks.hold(session_id):
             a = await self._get(session_id, action_id)
             if a.status is ActionStatus.PENDING:
                 if a.is_expired(self._clock()):
@@ -240,7 +229,7 @@ class Gateway:
 
     async def cancel(self, session_id: str, action_id: str) -> PendingAction:
         """Cancelling a non-PENDING action returns its state unchanged."""
-        async with self._session_lock(session_id):
+        async with self._locks.hold(session_id):
             a = await self._get(session_id, action_id)
             done = await self._pending.transition(a.id, ActionStatus.PENDING, ActionStatus.CANCELLED)
             if done is None:
