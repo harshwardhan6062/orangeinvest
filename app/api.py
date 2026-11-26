@@ -3,6 +3,7 @@
     POST /sessions/{session_id}/messages                       chat turn
     POST /sessions/{session_id}/actions/{action_id}/confirm    client-only
     POST /sessions/{session_id}/actions/{action_id}/cancel     client-only
+    GET  /                                                     chat UI (static page)
 
 Confirm and cancel are the only way a write executes; the model has no tool for
 them, and typing "yes" in chat is just another message. Both always answer 200
@@ -16,9 +17,11 @@ No auth yet: anyone holding a session id can act on it.
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path as FilePath
 from typing import Annotated, Any
 
 from fastapi import FastAPI, HTTPException, Path
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.agent import Agent
@@ -27,6 +30,8 @@ from app.llm import AnthropicLLM
 from app.mock_dineout import MockDineout
 from app.models import ActionStatus, PendingAction
 from app.repos import InMemoryAuditLog, InMemoryPendingActionRepo, InMemorySessionRepo
+
+INDEX_HTML = FilePath(__file__).parent / "static" / "index.html"
 
 SessionId = Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,64}$")]
 ActionId = Annotated[str, Path(pattern=r"^[a-f0-9]{32}$")]
@@ -70,6 +75,10 @@ def create_app(agent: Agent | None = None, gateway: Gateway | None = None) -> Fa
     if agent is None or gateway is None:
         agent, gateway = default_components()
     app = FastAPI(title="orangeinvest")
+
+    @app.get("/", include_in_schema=False)
+    async def index() -> FileResponse:
+        return FileResponse(INDEX_HTML)
 
     @app.post("/sessions/{session_id}/messages")
     async def post_message(session_id: SessionId, body: MessageIn) -> MessageOut:

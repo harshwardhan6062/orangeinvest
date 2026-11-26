@@ -49,6 +49,12 @@ async def test_search_matches_name_and_area(m, q, ids):
     assert [r["id"] for r in res["restaurants"]] == ids
 
 
+@pytest.mark.parametrize("city", ["Bangalore", "Bengaluru", " bengaluru "])
+async def test_search_accepts_both_city_names(m, city):
+    res = await m.call_tool("search_restaurants", {"query": "Phurr", "city": city})
+    assert len(res["restaurants"]) == 2
+
+
 async def test_search_other_city_is_empty_not_an_error(m):
     res = await m.call_tool("search_restaurants", {"query": "phurr", "city": "Mumbai"})
     assert res == {"restaurants": []}

@@ -6,8 +6,8 @@ carefully: search → slots → confirm → book → status. Swiggy's MCP server
 mocked; the agent runs on Claude.
 
 ```
-uv sync                                          # Python 3.11+, uv
-uv run pytest                                    # 186 tests, no API key needed
+./run.sh                                         # checks uv + key, starts the API, opens the chat UI
+uv run pytest                                    # 190 tests, no API key needed
 uv run uvicorn app.api:create_app --factory      # API on :8000 (needs ANTHROPIC_API_KEY)
 uv run python -m evals.run --runs 3              # live evals, pass rate per case
 uv run python -m scripts.smoke                   # live 2-turn run, saves raw requests/responses
@@ -17,6 +17,23 @@ uv run python -m scripts.smoke                   # live 2-turn run, saves raw re
 |---|---|---|
 | `ANTHROPIC_API_KEY` | | Or any credential the Anthropic SDK picks up |
 | `ORANGEINVEST_MODEL` | `claude-sonnet-5-5` | Model for the agent loop |
+
+## Try it
+
+Run `./run.sh` and a chat page opens. When the assistant prepares a booking,
+it shows up as a card with **Confirm** and **Cancel** buttons and a countdown
+to expiry. That button is the only way anything gets booked.
+
+| Type or do | What you should see |
+|---|---|
+| `Book Phurr Indiranagar for 2 at 7:30pm tomorrow` | A booking card. Press Confirm, then ask *"what's my booking ID?"* |
+| `Book Phurr Indiranagar for 2 at 8pm tomorrow` | 8pm and 8:30pm are full; it offers nearby times and proposes nothing until you pick one |
+| `Book Phurr for 2 at 7:30pm tomorrow` | Two outlets: it asks which one |
+| Press **Confirm again** on a booked card | The same booking ID comes back; it never books twice |
+| Type `yes` instead of pressing Confirm | Nothing is booked |
+| `Book Phurr Koramangala for 2 at 9pm tomorrow`, then Confirm | The mock's scripted failure: the booking fails and nothing is booked |
+
+Between midnight and 4 a.m. it will first ask which date you mean by "tomorrow".
 
 ## Architecture
 
@@ -40,6 +57,7 @@ The model decides what to do. The gateway decides whether that's allowed.
 | Component | Role |
 |---|---|
 | [api.py](app/api.py) | FastAPI. One chat endpoint, plus client-only `confirm` and `cancel`. No logic of its own |
+| [static/index.html](app/static/index.html) | The chat UI: one static page, no build step. Bookings appear as Confirm/Cancel cards |
 | [agent.py](app/agent.py) | Generic tool-use loop. Knows nothing about restaurants; the system prompt and tools carry that |
 | [llm.py](app/llm.py) | Claude on the Messages API: adaptive thinking, effort `medium`, prompt caching |
 | [gateway.py](app/gateway.py) | Every tool call goes through it. Enforces the safety model below |

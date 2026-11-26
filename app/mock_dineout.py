@@ -29,6 +29,15 @@ RESTAURANTS: dict[str, dict[str, str]] = {
     ]
 }
 
+# Both names are in everyday use; the model picks either (seen live: "Bengaluru").
+CITY_ALIASES = {"bengaluru": "bangalore"}
+
+
+def _city(name: str) -> str:
+    n = name.casefold().strip()
+    return CITY_ALIASES.get(n, n)
+
+
 SLOT_TIMES = [time(h, m) for h in range(18, 23) for m in (0, 30)]  # 18:00–22:30 every day
 
 # (restaurant_id, time of day). Applies to every date.
@@ -97,9 +106,9 @@ class MockDineout:
 
     def _search(self, args: dict[str, Any]) -> dict[str, Any]:
         # Every query word must appear in the name or area ("Phurr Indiranagar").
-        words, city = args["query"].casefold().split(), args["city"].casefold()
+        words, city = args["query"].casefold().split(), _city(args["city"])
         hits = [r for r in RESTAURANTS.values()
-                if r["city"].casefold() == city
+                if _city(r["city"]) == city
                 and all(w in f"{r['name']} {r['area']}".casefold() for w in words)]
         return {"restaurants": deepcopy(hits)}
 

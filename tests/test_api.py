@@ -139,3 +139,15 @@ def test_app_builds_with_defaults(monkeypatch):
     assert {"/sessions/{session_id}/messages",
             "/sessions/{session_id}/actions/{action_id}/confirm",
             "/sessions/{session_id}/actions/{action_id}/cancel"} <= routes
+
+
+async def test_root_serves_the_chat_page(world):
+    async with world() as c:
+        r = await c.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    page = r.text
+    assert "<title>orangeinvest" in page
+    # the page drives exactly the three API endpoints
+    for needle in ("/messages", "/actions/${this.p.id}/${verb}", "crypto.randomUUID()"):
+        assert needle in page

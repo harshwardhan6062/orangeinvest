@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orangeinvest · table booking agent</title>
+<style>
+  :root {
+    --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --line: #e7e5e4;
+    --bot: #f5f5f4; --me: #1c1917; --me-fg: #fafaf9;
+    --accent: #ea580c; --accent-soft: #fff7ed;
+    --ok: #15803d; --warn: #b45309; --err: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1c1917; --fg: #f5f5f4; --muted: #a8a29e; --line: #44403c;
+      --bot: #292524; --me: #f5f5f4; --me-fg: #1c1917; --accent-soft: #2a1a10;
+      --ok: #4ade80; --warn: #fbbf24; --err: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .app { max-width: 720px; margin: 0 auto; height: 100dvh; display: flex; flex-direction: column; }
+  header { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 16px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  header a { color: inherit; }
+  #chat { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 80%; padding: 9px 13px; border-radius: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.bot { background: var(--bot); align-self: flex-start; border-bottom-left-radius: 4px; }
+  .msg.me { background: var(--me); color: var(--me-fg); align-self: flex-end; border-bottom-right-radius: 4px; }
+  .msg.typing { color: var(--muted); }
+  .event { align-self: center; max-width: 90%; text-align: center; font-size: 13px; padding: 4px 12px;
+           border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
+  .event.ok { color: var(--ok); border-color: currentColor; }
+  .event.warn { color: var(--warn); border-color: currentColor; }
+  .event.err { color: var(--err); border-color: currentColor; }
+  .card { align-self: flex-start; width: min(100%, 440px); border: 2px solid var(--accent);
+          background: var(--accent-soft); border-radius: 12px; padding: 12px 14px; }
+  .card.settled { border-color: var(--line); background: transparent; }
+  .card .label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); }
+  .card.settled .label { color: var(--muted); }
+  .card .summary { font-weight: 600; margin: 4px 0; }
+  .card .expiry { font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .card .actions { display: flex; gap: 8px; margin: 10px 0 8px; }
+  .card .note { font-size: 12px; color: var(--muted); }
+  button { font: inherit; border-radius: 8px; padding: 7px 16px; cursor: pointer; border: 1px solid var(--line);
+           background: transparent; color: var(--fg); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chips button { font-size: 13px; padding: 5px 10px; border-radius: 999px; }
+  form { display: flex; gap: 8px; padding: 12px 16px 4px; border-top: 1px solid var(--line); }
+  form input { flex: 1; font: inherit; padding: 9px 12px; border-radius: 10px; border: 1px solid var(--line);
+               background: var(--bg); color: var(--fg); }
+  .hint { padding: 0 16px 12px; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>Table booking agent</h1>
+    <p>Swiggy Dineout is mocked. The assistant can search and prepare a booking; only the Confirm
+      button books it. <span id="session"></span> · <a href="/">new chat</a></p>
+  </header>
+
+  <main id="chat" aria-live="polite"></main>
+
+  <form id="form">
+    <input id="input" autocomplete="off" maxlength="2000" placeholder="e.g. Book Phurr Indiranagar for 2 at 7:30pm tomorrow">
+    <button class="primary" id="send">Send</button>
+  </form>
+  <div class="hint">Typing “yes” never books anything. The assistant has no way to press Confirm.</div>
+</div>
+
+<script>
+"use strict";
+const SID = crypto.randomUUID();  // fresh session per page load
+const chat = document.getElementById("chat");
+const form = document.getElementById("form");
+const input = document.getElementById("input");
+const send = document.getElementById("send");
+document.getElementById("session").textContent = "session " + SID.slice(0, 8);
+
+const SUGGESTIONS = [
+  "Book Phurr Indiranagar for 2 at 7:30pm tomorrow",
+  "Book Phurr Indiranagar for 2 at 8pm tomorrow",
+  "Book Phurr for 2 at 7:30pm tomorrow",
+  "Book Phurr Koramangala for 2 at 9pm tomorrow",
+];
+
+// --- rendering ---------------------------------------------------------------
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function show(node) {
+  chat.append(node);
+  chat.scrollTop = chat.scrollHeight;
+  return node;
+}
+
+// Text is escaped by textContent; only **bold** is turned into markup.
+function bubble(who, text) {
+  const b = el("div", "msg " + who);
+  for (const [i, part] of text.split("**").entries()) {
+    b.append(i % 2 ? el("strong", "", part) : document.createTextNode(part));
+  }
+  return show(b);
+}
+
+function event(text, kind = "") { return show(el("div", "event " + kind, text)); }
+
+function when(iso) {
+  return new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short",
+    day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+}
+
+// --- API -----------------------------------------------------------------------
+
+async function post(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: body ? { "content-type": "application/json" } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(typeof data.detail === "string" ? data.detail : `HTTP ${r.status}`);
+  return data;
+}
+
+// --- chat ------------------------------------------------------------------------
+
+function setBusy(busy) { input.disabled = send.disabled = busy; if (!busy) input.focus(); }
+
+async function say(text) {
+  chips.remove();
+  bubble("me", text);
+  setBusy(true);
+  const typing = show(el("div", "msg bot typing", "…"));
+  try {
+    const res = await post(`/sessions/${SID}/messages`, { text });
+    typing.remove();
+    bubble("bot", res.reply);
+    if (res.pending_action) new ActionCard(res.pending_action);
+  } catch (e) {
+    typing.remove();
+    event("Something went wrong: " + e.message, "err");
+  } finally {
+    setBusy(false);
+  }
+}
+
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  say(text);
+});
+
+// --- the confirm card: the only way a booking happens --------------------------------
+
+let openCard = null;
+
+class ActionCard {
+  constructor(p) {
+    // A new proposal replaces the old one on the server; mirror that here.
+    if (openCard && openCard.state === "pending") openCard.settle("Replaced by a newer request");
+    openCard = this;
+    this.p = p;
+    this.state = "pending";
+    this.bookingId = null;
+    this.expires = new Date(p.expires_at);
+
+    this.root = el("div", "card");
+    this.label = el("div", "label", "Waiting for you");
+    this.expiry = el("div", "expiry");
+    this.confirmBtn = el("button", "primary", "Confirm");
+    this.cancelBtn = el("button", "", "Cancel");
+    const actions = el("div", "actions");
+    actions.append(this.confirmBtn, this.cancelBtn);
+    this.root.append(this.label, el("div", "summary", p.summary), this.expiry, actions,
+      el("div", "note", "Nothing is booked until you press Confirm. The assistant can't press it for you."));
+    this.confirmBtn.onclick = () => this.act("confirm");
+    this.cancelBtn.onclick = () => this.act("cancel");
+    show(this.root);
+    this.tick();
+    this.timer = setInterval(() => this.tick(), 1000);
+  }
+
+  tick() {
+    if (this.state !== "pending") return;
+    const s = Math.max(0, Math.round((this.expires - Date.now()) / 1000));
+    this.expiry.textContent = `Expires in ${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    if (s === 0) {
+      this.settle("Expired");
+      event("The request expired before you confirmed it. Nothing was booked.", "warn");
+    }
+  }
+
+  settle(label, confirmAgain = false) {
+    clearInterval(this.timer);
+    this.state = "settled";
+    this.root.classList.add("settled");
+    this.label.textContent = label;
+    this.expiry.textContent = "";
+    this.cancelBtn.disabled = true;
+    this.confirmBtn.disabled = !confirmAgain;
+  }
+
+  async act(verb) {
+    const before = [this.label.textContent, this.confirmBtn.disabled, this.cancelBtn.disabled];
+    this.confirmBtn.disabled = this.cancelBtn.disabled = true;
+    this.label.textContent = verb === "confirm" ? "Booking…" : "Cancelling…";
+    try {
+      this.show(await post(`/sessions/${SID}/actions/${this.p.id}/${verb}`));
+    } catch (e) {  // request never got an answer: put the card back as it was
+      [this.label.textContent, this.confirmBtn.disabled, this.cancelBtn.disabled] = before;
+      event(`Couldn't ${verb}: ${e.message}`, "err");
+    }
+  }
+
+  // Render whatever state the server says the action is in.
+  show(a) {
+    switch (a.status) {
+      case "SUCCEEDED": {
+        const b = a.result;
+        if (this.bookingId === b.booking_id) {
+          event(`Same booking ${b.booking_id} came back. Pressing Confirm again never books twice.`);
+        } else {
+          this.bookingId = b.booking_id;
+          event(`Booked: ${b.restaurant}, ${when(b.time)}, ${b.party_size} people. Booking ID ${b.booking_id}`, "ok");
+        }
+        this.settle("Booked · " + b.booking_id, true);
+        this.confirmBtn.textContent = "Confirm again";
+        this.confirmBtn.title = "Safe to press: the same booking comes back, never a second one";
+        break;
+      }
+      case "UNKNOWN":
+        clearInterval(this.timer);  // retries aren't bound by the expiry
+        this.state = "unknown";
+        this.label.textContent = "No answer yet";
+        this.expiry.textContent = "";
+        this.confirmBtn.textContent = "Retry";
+        this.confirmBtn.disabled = false;
+        event("No definite answer from the restaurant. Press Retry: it's safe and can't book twice.", "warn");
+        break;
+      case "FAILED":
+        this.settle("Failed");
+        event(`Booking failed: ${a.error?.message ?? "unknown error"}. Nothing was booked.`, "err");
+        break;
+      case "CANCELLED":
+        this.settle("Cancelled");
+        event("Cancelled. Nothing was booked.");
+        break;
+      case "EXPIRED":
+        this.settle("Expired");
+        event("The request expired before you confirmed it. Nothing was booked.", "warn");
+        break;
+      case "SUPERSEDED":
+        this.settle("Replaced by a newer request");
+        event("This request was replaced by a newer one. Nothing was booked.");
+        break;
+      default:  // EXECUTING: another confirm is still running
+        this.label.textContent = "Still processing";
+        this.confirmBtn.disabled = false;
+        event("Still being processed. Press Confirm again in a moment.");
+    }
+  }
+}
+
+// --- start -----------------------------------------------------------------------
+
+bubble("bot", "Hi! I can find restaurants on Swiggy Dineout (mocked), check tables and prepare a booking for you to confirm. Try one of these:");
+const chips = show(el("div", "chips"));
+for (const s of SUGGESTIONS) {
+  const c = el("button", "", s);
+  c.type = "button";
+  c.onclick = () => say(s);
+  chips.append(c);
+}
+input.focus();
+</script>
+</body>
+</html>
