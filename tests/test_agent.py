@@ -75,7 +75,7 @@ async def test_each_turn_gets_time_as_system_message(env):
     user, system = llm.calls[0][-2:]
     assert user == {"role": "user", "content": "hello"}
     assert system["role"] == "system"
-    assert system["content"].startswith("Current time: Thursday 26 November 2026, 12:00 IST.")
+    assert system["content"] == "From the booking app (not the user): it is now Thursday 26 November 2026, 12:00 IST."
 
 
 async def test_no_notes_means_no_header(env):

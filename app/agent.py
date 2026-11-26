@@ -52,8 +52,13 @@ A booking is only made or cancelled when the person presses Confirm or Cancel. \
 The booking system reports the outcome to you in a system message on their next \
 turn. Only then tell them it's booked, and give the booking ID.
 
-All times are in India (Asia/Kolkata). A system message after each user message \
-gives the current time; use it to work out "tonight", "tomorrow" and so on.
+All times are in India (Asia/Kolkata). After each user message, the booking app \
+adds a system message with the current date and time. It is accurate: use it to work \
+out "today", "tonight" and "tomorrow", and never ask the person for today's date.
+
+Between midnight and 4 a.m., "tonight" and "tomorrow" are ambiguous: people often \
+mean the coming evening, not the next calendar date. At those hours, ask which date \
+they mean before checking slots or booking.
 
 If a tool returns an error, explain it plainly and offer a way forward. Keep \
 replies short."""
@@ -131,7 +136,10 @@ class Agent:
         notes = await self._sessions.notes(session_id)
         now = self._clock().astimezone(IST)
         parts = [NOTES_HEADER + "\n" + "\n\n".join(notes.values())] if notes else []
-        context = "\n\n".join([*parts, f"Current time: {now:%A} {now.day} {now:%B %Y, %H:%M} IST."])
+        # Attributed explicitly: unlabelled, the model sometimes took this line for
+        # something it had written itself and refused to trust the date (evals).
+        clock_line = f"From the booking app (not the user): it is now {now:%A} {now.day} {now:%B %Y, %H:%M} IST."
+        context = "\n\n".join([*parts, clock_line])
         opening = [{"role": "user", "content": user_text},
                    {"role": "system", "content": context}]
         tools = await self._gateway.tools()

@@ -75,11 +75,54 @@ Things the unit tests couldn't have caught; each one changed the code.
   correct, then verified live on both the confirm and cancel paths. Lesson:
   how a note is attributed matters as much as what it says, and the message's
   `system` role alone didn't carry that. Guarded by the `outcome_note` eval.
+- **The model distrusted the clock.** The first eval run failed 5 of 21. In 3
+  of 12 runs that opened with the same booking request, the model ignored the
+  per-turn `Current time: …` system message and asked the user for today's date.
+  One reply was "In my last message I wrote a current date and time, but I
+  don't have that information": it had taken the unlabelled line for something
+  it wrote itself. Same root cause as "Not yet". The line now reads *"From the
+  booking app (not the user): it is now …"*, and the system prompt says the time
+  is accurate and never to ask for today's date. Result: 63/63 across three
+  batches. Lesson, again: label every injected message with who it's from.
+- **"Tomorrow" after midnight.** At 00:20 the model read "tomorrow" as the next
+  calendar date in 2 of 3 runs. We'd rather it ask, so the system prompt now
+  says that between midnight and 4 a.m. "tonight" and "tomorrow" are
+  ambiguous and to ask which date before checking slots or booking. 9/9 since.
 - **An `end_turn` with no text.** Seen in the same replays. The agent now
   never sends the user a blank reply.
 - **Search by "Phurr Indiranagar" found nothing** because the mock matched the
   name only; the model recovered with a second search, costing a model call
   per booking. The mock now matches name and area, like a real search would.
+
+## Evals
+
+```
+uv run pytest tests/test_evals_scripted.py     # same cases, scripted model, no key
+uv run python -m evals.run --runs 3            # real model, pass rate per case
+```
+
+Each case is a conversation run through the real HTTP API, agent, gateway and
+mock. Checks look only at the audit log, stored actions and the mock's
+bookings, per step. They never look at reply text, which varies between runs
+while state shouldn't. Failing runs are written to `evals/report.json` with
+their audit trail and replies, for reading only.
+
+| Case | Must hold |
+|---|---|
+| `happy_path` | One proposal with the right restaurant, time and party; confirm books exactly that |
+| `slot_full` | 8pm is full: slots are checked, nothing proposed until the user picks 7:30 |
+| `ambiguous_restaurant` | Two Phurr outlets: nothing proposed until the user picks one |
+| `user_declines` | Cancel: nothing booked, nothing proposed again |
+| `duplicate_confirm` | Three confirm presses, two at once: one booking, executed once |
+| `outcome_note` | After confirm, the model checks status using the booking id, which it can only have learned from the outcome note ("Not yet" regression) |
+| `after_midnight_tomorrow` | At 00:20, "tomorrow" gets a question, not a proposal |
+
+The scripted twin (`tests/test_evals_scripted.py`) also runs scripts that
+reproduce failures seen live (guessing a date, distrusting the clock, ignoring
+the outcome note) and requires the checks to catch them.
+
+Latest live run, Claude Sonnet 5.5, 3 runs per case: 21/21. Each turn takes
+3–5 model calls and about 5–8 s of model time.
 
 ## Configuration
 
