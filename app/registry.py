@@ -12,14 +12,21 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from app.mcp_client import MCPClient, ToolSchema
-from app.models import RiskTier
-from app.validators import validate_booking, validate_booking_id, validate_slots_query
+from app.mcp_client import ToolSchema
+from app.models import RiskTier, ToolContext
+from app.validators import (
+    slot_key,
+    to_ist,
+    validate_booking,
+    validate_booking_id,
+    validate_search,
+    validate_slots_query,
+)
 
-Validator = Callable[[dict[str, Any], datetime], dict[str, Any]]
-# Gets read access to the MCP server so the summary shows facts from the
-# server, not names the LLM typed. Called only on already-validated args.
-Summarizer = Callable[[dict[str, Any], MCPClient], str]
+# All three are sync and pure apart from Recorder mutating ctx.facts.
+Validator = Callable[[dict[str, Any], ToolContext], dict[str, Any]]
+Summarizer = Callable[[dict[str, Any], ToolContext], str]  # gets validated args
+Recorder = Callable[[dict[str, Any], dict[str, Any], ToolContext], None]  # (args, result, ctx) after a read
 
 
 @dataclass(frozen=True)
@@ -28,14 +35,31 @@ class ToolSpec:
     tier: RiskTier
     validator: Validator | None = None
     summary: Summarizer | None = None
+    record: Recorder | None = None
 
     def __post_init__(self) -> None:
         if self.tier is RiskTier.WRITE and self.summary is None:
             raise ValueError(f"WRITE tool {self.name!r} needs a summary builder")
 
 
-def booking_summary(args: dict[str, Any], client: MCPClient) -> str:
-    r = client.call_tool("get_restaurant", {"restaurant_id": args["restaurant_id"]})
+def record_restaurants(args: dict[str, Any], result: dict[str, Any], ctx: ToolContext) -> None:
+    ctx.facts.setdefault("restaurants", {}).update({r["id"]: r for r in result["restaurants"]})
+
+
+def record_slots(args: dict[str, Any], result: dict[str, Any], ctx: ToolContext) -> None:
+    slots = ctx.facts.setdefault("slots", {})
+    for s in result["slots"]:
+        key = slot_key(args["restaurant_id"], args["party_size"], to_ist(s["time"]))
+        if s["available"]:
+            slots[key] = ctx.now.isoformat()
+        else:
+            slots.pop(key, None)  # a newer answer says it's gone
+
+
+def booking_summary(args: dict[str, Any], ctx: ToolContext) -> str:
+    # validate_booking guarantees the restaurant is in facts, so these are
+    # server facts, not names the LLM typed.
+    r = ctx.facts["restaurants"][args["restaurant_id"]]
     when = datetime.fromisoformat(args["time"])
     hour = when.strftime("%I:%M %p").lstrip("0")
     n = args["party_size"]
@@ -44,9 +68,8 @@ def booking_summary(args: dict[str, Any], client: MCPClient) -> str:
 
 
 REGISTRY: dict[str, ToolSpec] = {s.name: s for s in [
-    ToolSpec("search_restaurants", RiskTier.READ),
-    ToolSpec("get_restaurant", RiskTier.READ),
-    ToolSpec("get_available_slots", RiskTier.READ, validator=validate_slots_query),
+    ToolSpec("search_restaurants", RiskTier.READ, validator=validate_search, record=record_restaurants),
+    ToolSpec("get_available_slots", RiskTier.READ, validator=validate_slots_query, record=record_slots),
     ToolSpec("book_table", RiskTier.WRITE, validator=validate_booking, summary=booking_summary),
     ToolSpec("get_booking_status", RiskTier.READ, validator=validate_booking_id),
 ]}

@@ -50,12 +50,39 @@ class PendingAction:
         return now >= self.expires_at
 
 
+class AuditEvent(StrEnum):
+    DENIED = "DENIED"            # tool not in the registry
+    INVALID = "INVALID"          # validator rejected the args
+    READ = "READ"
+    READ_FAILED = "READ_FAILED"
+    PROPOSED = "PROPOSED"        # write stored as a PendingAction
+    SUPERSEDED = "SUPERSEDED"
+    CONFIRMED = "CONFIRMED"      # user confirmed; execution starting
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+
+
 @dataclass(frozen=True)
 class AuditEntry:
     session_id: str
-    event: str                  # e.g. "read", "proposed", "superseded", "succeeded", "denied"
+    event: AuditEvent
     tool: str
     args: dict[str, Any]
     action_id: str | None = None
     detail: dict[str, Any] | None = None
     at: datetime = field(default_factory=utcnow)
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """What validators, summaries and recorders may see.
+
+    `facts` is this session's cache of what the server has told us (search
+    results, offered slots). JSON-shaped so it can live in Postgres later.
+    Recorders mutate it; the gateway saves it.
+    """
+
+    now: datetime
+    facts: dict[str, Any]

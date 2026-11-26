@@ -4,12 +4,12 @@ Realism that the evals rely on:
 - two "Phurr" outlets in Bangalore (ambiguous restaurant)
 - some slots always full (slot-full path)
 - some slots always fail with UPSTREAM_ERROR (failure path), scripted, never random
-- book_table honours idempotency keys (duplicate confirm never double-books)
+- book_table honours idempotency keys (duplicate confirm never double-books;
+  same key with different args raises IDEMPOTENCY_CONFLICT)
 """
 
 from __future__ import annotations
 
-import threading
 from copy import deepcopy
 from datetime import date, datetime, time
 from typing import Any
@@ -54,8 +54,6 @@ _PARTY = {"type": "integer", "minimum": 1, "maximum": 20}
 SCHEMAS = [
     _schema("search_restaurants", "Find restaurants by name in a city.",
             query=_STR, city=_STR),
-    _schema("get_restaurant", "Get one restaurant's details.",
-            restaurant_id=_STR),
     _schema("get_available_slots", "List table slots for a date. Each slot has an "
             "ISO time and whether it is available.",
             restaurant_id=_STR, date={"type": "string", "format": "date"}, party_size=_PARTY),
@@ -69,25 +67,24 @@ SCHEMAS = [
 
 
 class MockDineout:
-    """Trusts its inputs: the gateway validates args before they get here."""
+    """Trusts its inputs: the gateway validates args before they get here.
+    No method awaits internally, so each call is atomic on the event loop."""
 
     def __init__(self, full=DEFAULT_FULL, failing=DEFAULT_FAILING) -> None:
         self._full = frozenset(full)
         self._failing = frozenset(failing)
         self._bookings: dict[str, dict[str, Any]] = {}
-        self._booking_by_key: dict[str, str] = {}
+        self._by_key: dict[str, tuple[tuple[Any, ...], str]] = {}  # key -> (fingerprint, booking_id)
         self._seq = 1000
-        self._lock = threading.Lock()
 
-    def list_tools(self) -> list[ToolSchema]:
+    async def list_tools(self) -> list[ToolSchema]:
         return list(SCHEMAS)
 
-    def call_tool(
+    async def call_tool(
         self, name: str, args: dict[str, Any], *, idempotency_key: str | None = None
     ) -> dict[str, Any]:
         match name:
             case "search_restaurants": return self._search(args)
-            case "get_restaurant": return deepcopy(self._restaurant(args["restaurant_id"]))
             case "get_available_slots": return self._slots(args)
             case "book_table": return self._book(args, idempotency_key)
             case "get_booking_status": return self._status(args)
@@ -114,36 +111,40 @@ class MockDineout:
         ]}
 
     def _book(self, args: dict[str, Any], key: str | None) -> dict[str, Any]:
-        with self._lock:
-            if key is not None and key in self._booking_by_key:
-                return deepcopy(self._bookings[self._booking_by_key[key]])
+        r = self._restaurant(args["restaurant_id"])
+        when = datetime.fromisoformat(args["time"]).astimezone(IST)
+        fingerprint = (r["id"], when.isoformat(), args["party_size"])
 
-            r = self._restaurant(args["restaurant_id"])
-            when = datetime.fromisoformat(args["time"]).astimezone(IST)
-            slot = (r["id"], when.time())
-            if when.time() not in SLOT_TIMES or slot in self._full:
-                raise MCPError(ErrorCode.SLOT_UNAVAILABLE,
-                               f"{r['name']}, {r['area']} has no table at {when:%H:%M}")
-            if slot in self._failing:
-                raise MCPError(ErrorCode.UPSTREAM_ERROR, "Dineout could not confirm the booking")
+        if key is not None and key in self._by_key:
+            seen, booking_id = self._by_key[key]
+            if seen != fingerprint:
+                raise MCPError(ErrorCode.IDEMPOTENCY_CONFLICT,
+                               "idempotency key was already used for a different booking")
+            return deepcopy(self._bookings[booking_id])
 
-            self._seq += 1
-            booking = {
-                "booking_id": f"SWG-{self._seq}",
-                "status": "CONFIRMED",
-                "restaurant_id": r["id"],
-                "restaurant": f"{r['name']}, {r['area']}",
-                "time": when.isoformat(),
-                "party_size": args["party_size"],
-            }
-            self._bookings[booking["booking_id"]] = booking
-            if key is not None:
-                self._booking_by_key[key] = booking["booking_id"]
-            return deepcopy(booking)
+        slot = (r["id"], when.time())
+        if when.time() not in SLOT_TIMES or slot in self._full:
+            raise MCPError(ErrorCode.SLOT_UNAVAILABLE,
+                           f"{r['name']}, {r['area']} has no table at {when:%H:%M}")
+        if slot in self._failing:
+            raise MCPError(ErrorCode.UPSTREAM_ERROR, "Dineout could not confirm the booking")
+
+        self._seq += 1
+        booking = {
+            "booking_id": f"SWG-{self._seq}",
+            "status": "CONFIRMED",
+            "restaurant_id": r["id"],
+            "restaurant": f"{r['name']}, {r['area']}",
+            "time": when.isoformat(),
+            "party_size": args["party_size"],
+        }
+        self._bookings[booking["booking_id"]] = booking
+        if key is not None:
+            self._by_key[key] = (fingerprint, booking["booking_id"])
+        return deepcopy(booking)
 
     def _status(self, args: dict[str, Any]) -> dict[str, Any]:
-        with self._lock:
-            b = self._bookings.get(args["booking_id"])
-            if b is None:
-                raise MCPError(ErrorCode.NOT_FOUND, f"no booking {args['booking_id']!r}")
-            return deepcopy(b)
+        b = self._bookings.get(args["booking_id"])
+        if b is None:
+            raise MCPError(ErrorCode.NOT_FOUND, f"no booking {args['booking_id']!r}")
+        return deepcopy(b)

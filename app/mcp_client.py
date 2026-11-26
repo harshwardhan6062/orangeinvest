@@ -11,6 +11,7 @@ class ErrorCode(StrEnum):
     SLOT_UNAVAILABLE = "SLOT_UNAVAILABLE"
     NOT_FOUND = "NOT_FOUND"
     UPSTREAM_ERROR = "UPSTREAM_ERROR"
+    IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"  # same key reused with different args
 
 
 class MCPError(Exception):
@@ -36,10 +37,14 @@ class ToolSchema:
 
 
 class MCPClient(Protocol):
-    def list_tools(self) -> list[ToolSchema]: ...
+    async def list_tools(self) -> list[ToolSchema]: ...
 
-    def call_tool(
+    async def call_tool(
         self, name: str, args: dict[str, Any], *, idempotency_key: str | None = None
     ) -> dict[str, Any]:
-        """Returns the tool's JSON result. Raises MCPError on failure."""
+        """Returns the tool's JSON result. Raises MCPError on failure.
+
+        How `idempotency_key` reaches the server (arg, `_meta`, header) is the
+        live adapter's business; callers just pass it.
+        """
         ...
