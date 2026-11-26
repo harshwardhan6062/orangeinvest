@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
+
+# India has no DST, so a fixed offset is exact and needs no tzdata.
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
 
 
 def utcnow() -> datetime:
